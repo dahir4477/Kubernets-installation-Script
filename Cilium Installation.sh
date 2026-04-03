@@ -1,37 +1,34 @@
+
 #!/bin/bash
 
 set -e
 
-echo "=== [1] Pre-check cluster ==="
+echo "=== [1] Understand cluster state ==="
+kubectl get nodes
+kubectl get pods -A
+
+echo "=== [2] Pre-check cluster ==="
 kubectl get nodes
 
-echo "=== [2] Install Cilium CLI ==="
-CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
-CLI_ARCH=amd64
+echo "=== [3] Check kernel version ==="
+uname -r
 
-curl -L --fail --remote-name-all \
-https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz
+echo "=== [4] Install Cilium CLI ==="
+curl -LO https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64.tar.gz
 
-tar xzvf cilium-linux-${CLI_ARCH}.tar.gz
-mv cilium /usr/local/bin/
-rm cilium-linux-${CLI_ARCH}.tar.gz
+sudo tar xzvf cilium-linux-amd64.tar.gz -C /usr/local/bin
 
-echo "=== [3] Verify CLI ==="
-cilium version
+rm -f cilium-linux-amd64.tar.gz
 
-echo "=== [4] Install Cilium ==="
+echo "=== [5] Verify cluster connectivity ==="
+kubectl cluster-info
 
-# Basic install (safe default)
+echo "=== [6] Install Cilium ==="
 cilium install
 
-echo "=== [5] Wait for Cilium to be ready ==="
+echo "=== [7] Check Cilium status ==="
 cilium status --wait
 
-echo "=== [6] Validate networking ==="
-cilium connectivity test
-
-echo "=== [7] Final cluster check ==="
-kubectl get pods -n kube-system
-kubectl get nodes
-
 echo "=== CILIUM INSTALLATION COMPLETE ==="
+
+
