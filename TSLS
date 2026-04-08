@@ -1,0 +1,152 @@
+We’re going to create a TLS certificate for a Kubernetes user, get it signed, and make it usable.
+
+Step 0 — Overview (Why we do this)
+
+Think of Kubernetes like a club with a locked door:
+
+You can only get in if you have a key (TLS certificate)
+Kubernetes uses certificates to check who you are and what you can do
+
+So what we’re doing:
+
+Make a private key = your personal key
+Make a CSR (certificate request) = a formal request to join the club
+Submit it to Kubernetes
+Approve it
+Get a signed certificate
+Use it to log in
+Step 1 — Generate a private key
+openssl genrsa -out user.key 2048
+
+Explanation:
+
+openssl genrsa → Generate RSA private key
+-out user.key → Save it to a file called user.key
+2048 → Key size (big enough for security)
+
+This is your secret key, don’t share it with anyone.
+
+Step 2 — Create a CSR (Certificate Signing Request)
+openssl req -new -key user.key -out user.csr -subj "/CN=dahir/O=dev-group"
+
+Explanation:
+
+openssl req -new → Make a new certificate request
+-key user.key → Use the private key we just made
+-out user.csr → Save the CSR to user.csr
+-subj "/CN=dahir/O=dev-group" → Fill the info:
+CN=dahir → Your username in Kubernetes
+O=dev-group → The group you belong to (used for permissions)
+
+Think of this as filling out a form to request a club membership.
+
+Step 3 — Encode the CSR for Kubernetes
+cat user.csr | base64 | tr -d '\n'
+
+Explanation:
+
+cat user.csr → Read the CSR file
+base64 → Turn it into a string of letters and numbers (Kubernetes likes this)
+tr -d '\n' → Remove line breaks (Kubernetes wants it all on one line)
+
+This produces a long string you can paste into a YAML file.
+
+Step 4 — Create Kubernetes CSR YAML
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: dahir-csr
+spec:
+  request: <PASTE_BASE64_CSR_HERE>
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 86400
+  usages:
+    - client auth
+
+Explanation line by line:
+
+apiVersion: certificates.k8s.io/v1 → Kubernetes API that handles certificate requests
+kind: CertificateSigningRequest → This is a CSR object
+metadata.name: dahir-csr → Name for the request (must be unique)
+spec.request → Paste the base64-encoded CSR here
+signerName: kubernetes.io/kube-apiserver-client → Tells Kubernetes: “This cert will be used to talk to the API server”
+expirationSeconds: 86400 → Certificate valid for 24 hours (86400 seconds)
+usages: client auth → This certificate will be used to authenticate a client
+
+Think of this YAML as the official request form for Kubernetes.
+
+Step 5 — Apply the CSR to Kubernetes
+kubectl apply -f csr.yaml
+
+Explanation:
+
+Sends the CSR YAML to Kubernetes
+Kubernetes now knows you want a certificate
+Step 6 — Approve the CSR
+kubectl certificate approve dahir-csr
+
+Explanation:
+
+Tells Kubernetes: “Yes, approve this certificate request”
+Kubernetes signs your CSR and generates a certificate
+
+Without approval, Kubernetes ignores your request — like the club manager hasn’t signed your form yet.
+
+Step 7 — Retrieve the signed certificate
+kubectl get csr dahir-csr -o jsonpath='{.status.certificate}' | base64 -d > user.crt
+
+Explanation:
+
+kubectl get csr dahir-csr → Get the CSR object
+-o jsonpath='{.status.certificate}' → Extract the signed certificate from the status
+base64 -d > user.crt → Decode it and save it as user.crt
+
+Now user.crt + user.key = your login credentials.
+
+Step 8 — Verify your certificate
+openssl x509 -in user.crt -text -noout
+
+Explanation:
+
+Shows the certificate info
+You can check CN, expiration, and usages
+
+Make sure CN=dahir and usage includes Client Authentication.
+
+Step 9 — Use the certificate in kubeconfig
+kubectl config set-credentials dahir \
+  --client-certificate=user.crt \
+  --client-key=user.key
+
+Explanation:
+
+Registers your certificate + key in kubeconfig
+Now you can use kubectl as user dahir
+Step 10 — Bind permissions (RBAC)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dahir-binding
+  namespace: default
+subjects:
+- kind: User
+  name: dahir
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+
+Explanation:
+
+Tells Kubernetes what the user can do
+RoleBinding attaches user dahir → role view
+Without this, your certificate is valid but you can’t do anything
+✅ Key Takeaways for Beginners
+Private key = your secret key
+CSR = the form you submit
+YAML = the official request
+Approve → get certificate
+RBAC → gives permissions
+
+Now you have a real Kubernetes TLS certificate setup, explained like a beginner could follow.
