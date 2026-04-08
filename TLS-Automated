@@ -1,0 +1,118 @@
+let’s build a full, automated TLS certificate onboarding system for Kubernetes users. This will generate the key, create the CSR, submit it, approve it, extract the signed certificate, and create a kubeconfig — all in one script. I’ll also include ready-to-use YAML templates so you can onboard multiple users safely.
+
+Step 0 — Directory Setup
+Create a folder to store all user certs:
+
+mkdir -p ~/k8s-users
+cd ~/k8s-users
+Step 1 — Automated Shell Script
+
+Save this as create-k8s-user.sh:
+
+#!/bin/bash
+# Usage: ./create-k8s-user.sh <username> <group> <namespace>
+
+USERNAME=$1
+GROUP=$2
+NAMESPACE=$3
+
+if [ -z "$USERNAME" ] || [ -z "$GROUP" ] || [ -z "$NAMESPACE" ]; then
+  echo "Usage: $0 <username> <group> <namespace>"
+  exit 1
+fi
+
+echo "Creating Kubernetes user: $USERNAME in group $GROUP"
+
+# 1️⃣ Generate private key
+openssl genrsa -out ${USERNAME}.key 2048
+echo "Private key generated: ${USERNAME}.key"
+
+# 2️⃣ Generate CSR
+openssl req -new -key ${USERNAME}.key -out ${USERNAME}.csr -subj "/CN=${USERNAME}/O=${GROUP}"
+echo "CSR generated: ${USERNAME}.csr"
+
+# 3️⃣ Encode CSR for Kubernetes
+CSR_BASE64=$(cat ${USERNAME}.csr | base64 | tr -d '\n')
+
+# 4️⃣ Create CSR YAML
+cat <<EOF > ${USERNAME}-csr.yaml
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: ${USERNAME}-csr
+spec:
+  request: ${CSR_BASE64}
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 86400
+  usages:
+    - client auth
+EOF
+
+kubectl apply -f ${USERNAME}-csr.yaml
+echo "CSR applied to Kubernetes: ${USERNAME}-csr.yaml"
+
+# 5️⃣ Approve CSR
+kubectl certificate approve ${USERNAME}-csr
+echo "CSR approved for user: $USERNAME"
+
+# 6️⃣ Extract signed certificate
+kubectl get csr ${USERNAME}-csr -o jsonpath='{.status.certificate}' | base64 -d > ${USERNAME}.crt
+echo "Signed certificate saved: ${USERNAME}.crt"
+
+# 7️⃣ Create kubeconfig
+kubectl config set-credentials ${USERNAME} \
+  --client-certificate=${USERNAME}.crt \
+  --client-key=${USERNAME}.key \
+  --embed-certs=true
+
+kubectl config set-context ${USERNAME}-context \
+  --cluster=$(kubectl config view -o jsonpath='{.contexts[0].context.cluster}') \
+  --user=${USERNAME} \
+  --namespace=${NAMESPACE}
+
+kubectl config use-context ${USERNAME}-context
+echo "Kubeconfig context created: ${USERNAME}-context"
+echo "User $USERNAME setup complete"
+
+Explanation:
+
+Step 1 → generates private key
+Step 2 → CSR (request form)
+Step 3 → encode CSR for YAML
+Step 4 → creates a CSR YAML ready for Kubernetes
+Step 5 → applies it and approves it
+Step 6 → extracts the signed certificate
+Step 7 → sets up a kubeconfig context pointing to the cluster
+
+Step 2 — RBAC Binding YAML
+
+Create rolebinding-template.yaml:
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: <USERNAME>-binding
+  namespace: <NAMESPACE>
+subjects:
+- kind: User
+  name: <USERNAME>
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+
+Step 3 — Run the Script
+
+chmod +x create-k8s-user.sh
+./create-k8s-user.sh dahir dev-group default
+Step 4 — Apply RBAC
+sed "s/<USERNAME>/dahir/g; s/<NAMESPACE>/default/g" rolebinding-template.yaml | kubectl apply -f -
+
+This gives user dahir view permissions in default namespace
+You can adjust the role to edit or admin as needed
+
+Step 5 — Test
+
+kubectl get pods --context=dahir-context
+
