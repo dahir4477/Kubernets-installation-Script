@@ -1,0 +1,157 @@
+let’s build version 2: production-ready, fully automated, per-user Kubernetes PKI system. This one will:
+
+Generate a key and CSR per user
+Submit & approve the CSR
+Extract the signed certificate
+Create a separate kubeconfig per user
+Handle certificate rotation if needed
+Keep everything organized in folders for backup
+
+  Step 0 — Directory Layout
+
+  mkdir -p ~/k8s-users/certs
+mkdir -p ~/k8s-users/kubeconfigs
+cd ~/k8s-users
+
+  Explanation:
+
+~/k8s-users/certs → store keys and certs
+~/k8s-users/kubeconfigs → store separate kubeconfigs per user
+Keeps things clean and organized
+
+  Step 1 — Production Script
+
+Save as create-k8s-user-v2.sh:
+
+  #!/bin/bash
+# Usage: ./create-k8s-user-v2.sh <username> <group> <namespace>
+
+USERNAME=$1
+GROUP=$2
+NAMESPACE=$3
+
+if [ -z "$USERNAME" ] || [ -z "$GROUP" ] || [ -z "$NAMESPACE" ]; then
+  echo "Usage: $0 <username> <group> <namespace>"
+  exit 1
+fi
+
+echo "🔑 Creating Kubernetes user: $USERNAME in group $GROUP"
+
+CERT_DIR=certs/$USERNAME
+KUBECONFIG_DIR=kubeconfigs
+mkdir -p $CERT_DIR
+
+# Step 1️⃣: Generate private key
+openssl genrsa -out $CERT_DIR/${USERNAME}.key 2048
+echo "✅ Private key generated: $CERT_DIR/${USERNAME}.key"
+
+# Step 2️⃣: Generate CSR
+openssl req -new -key $CERT_DIR/${USERNAME}.key -out $CERT_DIR/${USERNAME}.csr -subj "/CN=${USERNAME}/O=${GROUP}"
+echo "✅ CSR generated: $CERT_DIR/${USERNAME}.csr"
+
+# Step 3️⃣: Encode CSR in base64 for Kubernetes
+CSR_BASE64=$(cat $CERT_DIR/${USERNAME}.csr | base64 | tr -d '\n')
+
+# Step 4️⃣: Create Kubernetes CSR YAML
+cat <<EOF > $CERT_DIR/${USERNAME}-csr.yaml
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: ${USERNAME}-csr
+spec:
+  request: ${CSR_BASE64}
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 86400
+  usages:
+    - client auth
+EOF
+
+kubectl apply -f $CERT_DIR/${USERNAME}-csr.yaml
+echo "📄 CSR applied to Kubernetes: $CERT_DIR/${USERNAME}-csr.yaml"
+
+# Step 5️⃣: Approve CSR
+kubectl certificate approve ${USERNAME}-csr
+echo "✔️ CSR approved for user: $USERNAME"
+
+# Step 6️⃣: Extract signed certificate
+kubectl get csr ${USERNAME}-csr -o jsonpath='{.status.certificate}' | base64 -d > $CERT_DIR/${USERNAME}.crt
+echo "📄 Signed certificate saved: $CERT_DIR/${USERNAME}.crt"
+
+# Step 7️⃣: Create per-user kubeconfig
+USER_KUBECONFIG=$KUBECONFIG_DIR/${USERNAME}-kubeconfig
+kubectl config set-cluster default-cluster \
+  --server=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}') \
+  --certificate-authority=$(kubectl config view -o jsonpath='{.clusters[0].cluster.certificate-authority}') \
+  --embed-certs=true \
+  --kubeconfig=$USER_KUBECONFIG
+
+kubectl config set-credentials $USERNAME \
+  --client-certificate=$CERT_DIR/${USERNAME}.crt \
+  --client-key=$CERT_DIR/${USERNAME}.key \
+  --embed-certs=true \
+  --kubeconfig=$USER_KUBECONFIG
+
+kubectl config set-context ${USERNAME}-context \
+  --cluster=default-cluster \
+  --user=$USERNAME \
+  --namespace=$NAMESPACE \
+  --kubeconfig=$USER_KUBECONFIG
+
+kubectl config use-context ${USERNAME}-context --kubeconfig=$USER_KUBECONFIG
+
+echo "🎉 Kubeconfig created for user: $USER_KUBECONFIG"
+
+# Optional: Auto backup
+tar czf $CERT_DIR/${USERNAME}-backup-$(date +%F).tgz $CERT_DIR
+echo "💾 Backup created: $CERT_DIR/${USERNAME}-backup-$(date +%F).tgz"
+
+  | Step | What it does        | Explanation for beginners                 |
+| ---- | ------------------- | ----------------------------------------- |
+| 1    | Generate key        | Your secret key, don’t share              |
+| 2    | Generate CSR        | Request form for Kubernetes               |
+| 3    | Base64 encode       | Kubernetes needs CSR in one line          |
+| 4    | Create YAML         | Official request for cluster approval     |
+| 5    | Apply CSR           | Send to Kubernetes                        |
+| 6    | Approve CSR         | Kubernetes signs the certificate          |
+| 7    | Extract certificate | Now you have your login cert              |
+| 8    | Create kubeconfig   | Separate file per user                    |
+| 9    | Backup              | Saves certs + key in a compressed archive |
+
+  Step 3 — Run the script
+
+  chmod +x create-k8s-user-v2.sh
+./create-k8s-user-v2.sh dahir dev-group default
+
+  certs/dahir/dahir.key
+certs/dahir/dahir.crt
+certs/dahir/dahir-csr.yaml
+certs/dahir/dahir-backup-2026-04-08.tgz
+kubeconfigs/dahir-kubeconfig
+
+
+  Step 4 — Apply RBAC for the user
+
+    apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dahir-binding
+  namespace: default
+subjects:
+- kind: User
+  name: dahir
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+
+    kubectl apply -f dahir-rolebinding.yaml
+
+    This allows dahir to see resources in default namespace.
+Change Role to edit or admin if higher privileges are needed.
+
+  Step 6 — Next-Level Production Tips
+  Rotation: change expirationSeconds to shorter duration, then rerun script
+Multi-user onboarding: run script per username/group/namespace
+Backup: the script already makes a compressed backup for each user
+Isolation: each kubeconfig is separate, no sharing of keys
